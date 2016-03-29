@@ -1,0 +1,104 @@
+#!/bin/bash
+
+set -eu
+set -o pipefail
+
+echo "Update! parameters are" $@
+
+EMPTY="0000000000000000000000000000000000000000"
+refs="$1"
+old_rev="$2"
+new_rev="$3"
+action="change"
+if [ "$old_rev" == "$EMPTY" ] ; then
+    action="create"
+elif [ "$new_rev" == "$EMPTY" ] ; then
+    action="delete"
+fi
+
+function get_sha_list {
+    local old_rev="$1"
+    local new_rev="$2"
+    if [ "$old_rev" == "$EMPTY" ] ; then
+        # Because I'm too lazy to figure this out by myself
+        # http://stackoverflow.com/questions/3511057/git-receive-update-hooks-and-new-branches
+        git rev-list $new_rev --not --branches=*
+    else
+        git rev-list ${old_rev}..${new_rev}
+    fi
+}
+
+function get_commit {
+    local sha="$1"
+    git cat-file commit "$sha"
+}
+
+function validate_issue_number {
+    local issue_number="$1"
+    # Do some kind of cURL to validate the issue exists and is valid
+}
+
+function validate_refs {
+    local refs="$1" # refs/heads/newbranch
+    local action="$2" # change, create, delete
+    # Type can be either 'tags', 'heads' (branch) or 'remotes'.
+    local ref_type="$(echo "$refs" | awk -F\/ '{print $2}')"
+    local ref_name="$(echo "$refs" | awk -F\/ '{print $3}')"
+
+    # For a more elegant solution, check out git's default update.sample on
+    # how to manage the multiple use cases.
+    if [ "$ref_type" == "heads" ] && [ "$ref_name" == "master" ] ; then
+        echo "Changes on the 'master' branch are forbidden."
+        echo "We only support pull request workflow."
+        echo "Try the following commands:"
+        echo "git checkout -b newbranch"
+        echo "git push -u origin newbranch"
+        exit 1
+    fi
+}
+
+# Author is the original author of the code
+# Committer is the one commiting the code on behalf of the author
+# It may be the same but it doesn't have to be.
+# Distinction is important since GIT allows the committer to rewrite history
+# on behalf of the author (both of them get creditted).
+function validate_author {
+    local username mail epoch timezone
+    read username mail epoch timezone <<< $(echo "$1" | grep author | awk '{print $2, $3, $4, $5}')
+}
+function validate_committer {
+    local username mail epoch timezone
+    read username mail epoch timezone <<< $(echo "$1" | grep author | awk '{print $2, $3, $4, $5}')
+}
+function validate_comment {
+    local msg=$(echo "$1" | sed '1,/^$/d')
+    local issue_number=$(echo "${msg}" | sed -n 's/.*\(#STRY[0-9]\{6\}\).*/\1/p')
+    if [ -z "$issue_number" ] ; then
+        echo "Issue number seems to be empty! Unable to parse commit message: $msg"
+        return 1
+    fi
+    validate_issue_number "$issue_number" || exit 1
+}
+
+if ! validate_refs "$refs" "$action" ; then
+    echo "Invalid operation on REFS."
+    exit 1
+fi
+
+for sha in $(get_sha_list "$old_rev" "$new_rev") ; do
+    commit=$(get_commit "$sha")
+    if ! validate_author "$commit" ; then
+        echo "Invalid author." && exit 1
+    fi
+
+    if ! validate_committer "$commit" ; then
+        echo "Invalid commiter." && exit 1
+    fi
+
+    if !  validate_comment "$commit" ; then
+        echo "Invalid comment."
+        echo "You may need to run: git rebase --interactive $sha^"
+        echo "Read the help carefully (you probably want to 'reword' the commit)."
+        exit 1
+    fi
+done
